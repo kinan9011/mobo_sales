@@ -7,6 +7,7 @@ import '../../services/customer_service.dart';
 import '../../services/odoo_session_manager.dart';
 import '../../widgets/confetti_dialogs.dart';
 import '../../utils/data_loss_warning_mixin.dart';
+import '../../utils/odoo_image_headers.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:mobo_sales/widgets/circular_image_widget.dart';
@@ -1689,7 +1690,10 @@ class _EditCustomerScreenState extends State<EditCustomerScreen>
           backgroundColor: isDark
               ? Colors.grey.shade200
               : Theme.of(context).primaryColor.withOpacity(.1),
-          backgroundImage: NetworkImage(imageUrl),
+          backgroundImage: NetworkImage(
+            imageUrl,
+            headers: odooImageHeaders(imageUrl),
+          ),
         );
       } else {
         photoWidget = CircularImageWidget(

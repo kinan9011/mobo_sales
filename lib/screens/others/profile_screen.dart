@@ -9,7 +9,11 @@ import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:provider/provider.dart';
 import 'package:mobo_sales/screens/others/settings_screen.dart';
 import 'package:mobo_sales/utils/app_theme.dart';
+import 'package:mobo_sales/utils/odoo_image_headers.dart';
 import 'package:shimmer/shimmer.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:mobo_sales/services/cf_access/cf_access_gate.dart';
+import 'package:mobo_sales/services/secret_store.dart';
 import 'package:mobo_sales/services/session_service.dart';
 import 'package:mobo_sales/widgets/custom_text_field.dart';
 import 'package:mobo_sales/widgets/custom_dropdown.dart';
@@ -1306,7 +1310,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return result ?? false;
   }
 
-  Future<void> _performLogout(BuildContext context) async {
+  Future<void> _performLogout(BuildContext context, {Uri? cfLogoutUrl}) async {
     BuildContext? dialogContext;
 
     showDialog(
@@ -1416,10 +1420,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (rootContext != null && rootContext.mounted) {
       CustomSnackbar.showSuccess(rootContext, 'Logged out successfully');
     }
+    if (cfLogoutUrl != null) {
+      try {
+        await launchUrl(cfLogoutUrl, mode: LaunchMode.externalApplication);
+      } catch (_) {}
+    }
   }
 
   Future<void> _showLogoutDialog(BuildContext context) async {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final cfLogoutUrl = await SessionService.instance.cloudflareLogoutUrl();
+    var signOutOfCloudflare = false;
+    if (!context.mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: true,
@@ -1436,12 +1448,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 : Theme.of(context).colorScheme.onSurface,
           ),
         ),
-        content: Text(
-          'Are you sure you want to log out? Your session will be ended.',
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: isDark
-                ? Colors.grey[300]
-                : Theme.of(context).colorScheme.onSurfaceVariant,
+        content: StatefulBuilder(
+          builder: (ctx, setDialogState) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Are you sure you want to log out? Your session will be ended.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: isDark
+                      ? Colors.grey[300]
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (cfLogoutUrl != null)
+                CheckboxListTile(
+                  value: signOutOfCloudflare,
+                  onChanged: (v) =>
+                      setDialogState(() => signOutOfCloudflare = v ?? false),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text(
+                    'Also sign out of Cloudflare on this device',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: isDark
+                          ? Colors.grey[300]
+                          : Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
         actionsPadding: const EdgeInsets.symmetric(
@@ -1507,7 +1543,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
 
     if (confirmed == true && context.mounted) {
-      await _performLogout(context);
+      await _performLogout(
+        context,
+        cfLogoutUrl: signOutOfCloudflare ? cfLogoutUrl : null,
+      );
     }
   }
 
@@ -2489,6 +2528,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return CachedNetworkImage(
       imageUrl: avatarUrl,
+      // Saved accounts can be on another server: never send this session's cookie there.
+      httpHeaders:
+          odooImageHeaders(avatarUrl) ??
+          OdooSessionManager.bearerHeaders(avatarUrl),
       fit: BoxFit.cover,
       fadeInDuration: const Duration(milliseconds: 200),
       placeholder: (context, url) {
@@ -2610,7 +2653,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (context.mounted) {
         Navigator.pop(context);
 
-        if (e.toString().toLowerCase().contains('authentication') ||
+        if (e is CfGateException) {
+          _showErrorSnackBar(e.message);
+        } else if (e.toString().toLowerCase().contains('authentication') ||
             e.toString().toLowerCase().contains('password') ||
             e.toString().toLowerCase().contains('credentials')) {
           Navigator.push(
@@ -2743,7 +2788,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     biometricContext.startAccountOperation('account_switch');
 
     try {
-      final prefs = await SharedPreferences.getInstance();
       String? password;
 
       final userId = account['userId']?.toString();
@@ -2752,18 +2796,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
           account['username']?.toString() ?? account['userName']?.toString();
 
       if (userId != null && database != null) {
-        password = prefs.getString('password_${userId}_$database');
+        password = await SecretStore.instance.read(
+          'password_${userId}_$database',
+        );
       }
 
       if (password == null && username != null && database != null) {
-        password = prefs.getString('password_${username}_$database');
+        password = await SecretStore.instance.read(
+          'password_${username}_$database',
+        );
       }
 
-      password ??= prefs.getString('password');
+      password ??= await SecretStore.instance.read('password');
 
       if (password == null || password.isEmpty) {
         throw Exception('No password found for account');
       }
+
+      await sessionService.ensureCloudflareAccess(
+        account['serverUrl']?.toString() ?? '',
+      );
 
       final newSession = await OdooSessionManager.authenticate(
         serverUrl: account['serverUrl'],
@@ -3141,12 +3193,9 @@ class _AccountDrawer extends StatelessWidget {
         child: avatarUrl != null
             ? CachedNetworkImage(
                 imageUrl: avatarUrl,
-                httpHeaders: sessionService.currentSession?.sessionId != null
-                    ? {
-                        "Cookie":
-                            "session_id=${sessionService.currentSession!.sessionId}",
-                      }
-                    : {},
+                httpHeaders:
+                    odooImageHeaders(avatarUrl) ??
+                    OdooSessionManager.bearerHeaders(avatarUrl),
                 width: 44,
                 height: 44,
                 fit: BoxFit.cover,
@@ -3284,7 +3333,6 @@ class _AccountDrawer extends StatelessWidget {
         throw Exception('Account not found in stored accounts');
       }
 
-      final prefs = await SharedPreferences.getInstance();
       String? password;
 
       final userId = account['userId']?.toString();
@@ -3293,18 +3341,26 @@ class _AccountDrawer extends StatelessWidget {
           account['username']?.toString() ?? account['userName']?.toString();
 
       if (userId != null && database != null) {
-        password = prefs.getString('password_${userId}_$database');
+        password = await SecretStore.instance.read(
+          'password_${userId}_$database',
+        );
       }
 
       if (password == null && username != null && database != null) {
-        password = prefs.getString('password_${username}_$database');
+        password = await SecretStore.instance.read(
+          'password_${username}_$database',
+        );
       }
 
-      password ??= prefs.getString('password');
+      password ??= await SecretStore.instance.read('password');
 
       if (password == null || password.isEmpty) {
         throw Exception('No password found for account');
       }
+
+      await sessionService.ensureCloudflareAccess(
+        account['serverUrl']?.toString() ?? '',
+      );
 
       final newSession = await OdooSessionManager.authenticate(
         serverUrl: account['serverUrl'],
@@ -3352,7 +3408,9 @@ class _AccountDrawer extends StatelessWidget {
         Navigator.pop(context);
         CustomSnackbar.showError(
           context,
-          'Error switching account: ${e.toString()}',
+          e is CfGateException
+              ? e.message
+              : 'Error switching account: ${e.toString()}',
         );
       }
     }

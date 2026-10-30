@@ -17,7 +17,13 @@ import '../providers/settings_provider.dart';
 import '../providers/last_opened_provider.dart';
 import '../providers/product_provider.dart';
 import '../providers/login_provider.dart';
+import '../utils/cf_host_release.dart';
+import 'cf_access/cf_access_gate.dart';
+import 'cf_access/cf_sign_out.dart';
 import 'odoo_session_manager.dart';
+import 'remote_sign_out.dart';
+import 'secret_store.dart';
+import 'shared_http.dart';
 import 'odoo_api_service.dart';
 import 'biometric_context_service.dart';
 import '../screens/others/dashboard_screen.dart';
@@ -40,6 +46,7 @@ class SessionService extends ChangeNotifier {
   bool _isLoggingOut = false;
   bool _isLoading = false;
   List<Map<String, dynamic>> _storedAccounts = [];
+  final CfAccessGate _cfGate = CfAccessGate(SharedHttp.auth);
 
   OdooSessionModel? get currentSession => _currentSession;
   bool get isInitialized => _isInitialized;
@@ -159,12 +166,22 @@ class SessionService extends ChangeNotifier {
 
   /// [showNotice] shows the "Logged out" snackbar; pass false when the
   /// caller presents its own logout feedback (e.g. settings/profile screens).
-  Future<void> logout({bool showNotice = true}) async {
+  /// [remote] false skips the network steps (Odoo session destroy, Cloudflare
+  /// revoke) and only wipes local state, e.g. after the Cloudflare session
+  /// expired.
+  ///
+  /// Logout wipes every stored account, so every host's Cloudflare tokens are
+  /// revoked and deleted along with them.
+  Future<void> logout({bool showNotice = true, bool remote = true}) async {
     _isLoggingOut = true;
     notifyListeners();
     try {
       try {
-        await OdooSessionManager.logout();
+        await OdooSessionManager.logout(
+          cfHosts: _knownHosts(),
+          cfReleaseAll: true,
+          remote: remote,
+        );
       } catch (e) {}
 
       await _clearStoredAccountsData();
@@ -178,6 +195,51 @@ class SessionService extends ChangeNotifier {
       if (showNotice) {
         _showLoggedOutNoticeSafely();
       }
+    }
+  }
+
+  /// Hosts of the current session and every stored account.
+  Set<String> _knownHosts() => {
+    ?_currentHost,
+    for (final account in _storedAccounts) ?accountHost(account),
+  };
+
+  String? get _currentHost {
+    final url = _currentSession?.serverUrl;
+    if (url == null) return null;
+    final host = Uri.tryParse(url)?.host ?? '';
+    return host.isEmpty ? null : host.toLowerCase();
+  }
+
+  /// Cloudflare sign-out page for the current server, or null when the
+  /// current host has no Cloudflare token set.
+  Future<Uri?> cloudflareLogoutUrl() async {
+    final host = _currentHost;
+    if (host == null) return null;
+    try {
+      final tokens = await SharedHttp.store.read(host);
+      if (tokens == null || !tokens.hasTokens) return null;
+      return cfAccessLogoutUrl(tokens);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Makes sure [serverUrl] has Cloudflare tokens before switching to an
+  /// account there, signing in through the browser when needed. Throws a
+  /// [CfGateException] (message safe to show) if that fails or is cancelled.
+  Future<void> ensureCloudflareAccess(String serverUrl) async {
+    final uri = Uri.tryParse(serverUrl.trim());
+    if (uri == null || uri.host.isEmpty) return;
+    if (uri.host.toLowerCase() == _currentHost) return;
+    try {
+      await _cfGate.ensureAccess(uri);
+    } on CfGateException catch (e) {
+      throw CfGateException(
+        e.message == CfAccessGate.cancelledMessage
+            ? 'Organization sign-in was cancelled. You are still on your current account.'
+            : e.message,
+      );
     }
   }
 
@@ -495,6 +557,13 @@ class SessionService extends ChangeNotifier {
           .cast<Map<String, dynamic>>()
           .toList();
 
+      // Passwords and session IDs are kept in secure storage, not prefs.
+      final secrets = await SecretStore.instance.readAccountSecrets();
+      for (final account in _storedAccounts) {
+        final stored = secrets[accountSecretKey(account)];
+        if (stored != null) account.addAll(stored);
+      }
+
       await _cleanupDuplicateAccounts();
 
       await _autoStoreCurrentSession();
@@ -645,23 +714,16 @@ class SessionService extends ChangeNotifier {
     String password,
   ) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final store = SecretStore.instance;
 
-      await prefs.setString(
+      await store.write(
         'password_${session.userId}_${session.database}',
         password,
       );
-      await prefs.setString(
+      await store.write(
         'password_${session.userLogin}_${session.database}',
         password,
       );
-
-      if (session.userLogin.contains('@')) {
-        await prefs.setString(
-          'password_${session.userLogin}_${session.database}',
-          password,
-        );
-      }
     } catch (e) {}
   }
 
@@ -669,7 +731,6 @@ class SessionService extends ChangeNotifier {
     Map<String, dynamic> accountData,
   ) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
       final userId = accountData['id'] ?? accountData['userId'];
       final username = accountData['username'] ?? accountData['email'];
       final database = accountData['database'];
@@ -688,7 +749,7 @@ class SessionService extends ChangeNotifier {
       }
 
       for (String key in passwordKeys) {
-        final password = prefs.getString(key);
+        final password = await SecretStore.instance.read(key);
         if (password != null && password.isNotEmpty) {
           return password;
         }
@@ -710,7 +771,17 @@ class SessionService extends ChangeNotifier {
 
         final biometricEnabled = prefs.getBool('biometric_enabled');
 
-        final updatedAccountsJson = _storedAccounts
+        final split = splitAccountSecrets(_storedAccounts);
+
+        // Keep secrets of accounts still listed (even if not hydrated in
+        // memory), drop those of removed accounts, then overlay new values.
+        final liveKeys = _storedAccounts.map(accountSecretKey).toSet();
+        final secrets = await SecretStore.instance.readAccountSecrets()
+          ..removeWhere((key, _) => !liveKeys.contains(key));
+        split.secrets.forEach((k, v) => secrets[k] = {...?secrets[k], ...v});
+        await SecretStore.instance.writeAccountSecrets(secrets);
+
+        final updatedAccountsJson = split.accounts
             .map((account) => jsonEncode(account))
             .toList();
 
@@ -735,12 +806,33 @@ class SessionService extends ChangeNotifier {
       return;
     }
 
-    _storedAccounts.removeAt(accountIndex);
+    final removed = _storedAccounts.removeAt(accountIndex);
     await _saveStoredAccountsWithRetry();
     notifyListeners();
+
+    // Cloudflare tokens belong to the host: keep them while another account
+    // or the active session still uses it.
+    final release = hostsToReleaseAfterRemoval(
+      _storedAccounts,
+      removed,
+      _currentHost,
+    );
+    if (release.isNotEmpty) {
+      await remoteSignOut(
+        client: SharedHttp.client,
+        auth: SharedHttp.auth,
+        releaseHosts: release,
+      );
+    }
   }
 
   Future<bool> switchToAccount(OdooSessionModel newSession) async {
+    try {
+      await ensureCloudflareAccess(newSession.serverUrl);
+    } on CfGateException {
+      return false;
+    }
+
     _isLoading = true;
     notifyListeners();
 
@@ -929,6 +1021,8 @@ class SessionService extends ChangeNotifier {
         }
       }
 
+      await SecretStore.instance.delete(SecretStore.accountsKey);
+
       _storedAccounts.clear();
     } catch (e) {}
   }
@@ -945,6 +1039,8 @@ class SessionService extends ChangeNotifier {
       for (final key in passwordKeys) {
         await prefs.remove(key);
       }
+
+      await SecretStore.instance.deleteWhere('password_');
     } catch (e) {}
   }
 
@@ -987,6 +1083,10 @@ class SessionService extends ChangeNotifier {
     }
 
     final accountData = _storedAccounts[accountIndex];
+
+    // Before anything is torn down, so a cancelled sign-in leaves the
+    // current account untouched.
+    await ensureCloudflareAccess(accountData['serverUrl']?.toString() ?? '');
 
     try {
       final sessionId = accountData['sessionId']?.toString();

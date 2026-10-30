@@ -1,12 +1,13 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:provider/provider.dart';
 import '../../services/auth_service.dart';
+import '../../services/cf_access/cf_access_gate.dart';
 import '../../services/odoo_session_manager.dart';
+import '../../services/odoo_totp_login.dart';
+import '../../services/shared_http.dart';
 import '../../services/session_service.dart';
 import '../../home_scaffold.dart';
 
@@ -33,31 +34,73 @@ class TotpPage extends StatefulWidget {
 }
 
 class _TotpPageState extends State<TotpPage> {
-  InAppWebViewController? _webController;
   final _totpController = TextEditingController();
   String? _error;
   bool _loading = true;
   bool _verifying = false;
   bool _isButtonEnabled = false;
   final _formKey = GlobalKey<FormState>();
-  bool _credentialsInjected = false;
   bool _isSessionExtracted = false;
   bool _loginSuccess = false;
 
-  /// Whether [url] is a signed-in Odoo page.
-  ///
-  /// Classified on the parsed [Uri.path], never the raw URL string. A
-  /// substring test such as `url.contains('/odoo')` also matches the `//odoo`
-  /// inside a host like `https://odoo.customer.com`, which makes every page on
-  /// that server — including the login page — look like a completed sign-in.
-  static bool _isSignedInUrl(String url) {
-    final path = Uri.tryParse(url)?.path ?? '';
-    if (path.contains('/login') || path.contains('/totp')) return false;
-    return path == '/web' ||
-        path.startsWith('/web/') ||
-        path == '/odoo' ||
-        path.startsWith('/odoo/') ||
-        path.startsWith('/website');
+  late final OdooTotpLogin _login;
+  late final CfAccessGate _gate;
+  late final Uri _server;
+
+  @override
+  void initState() {
+    super.initState();
+    _server = Uri.parse(widget.serverUrl);
+    _gate = CfAccessGate(SharedHttp.auth);
+    _login = OdooTotpLogin(
+      client: OdooSessionManager.ioClient,
+      serverUrl: widget.serverUrl,
+      database: widget.database,
+      userAgent: OdooSessionManager.USER_AGENT,
+    );
+    _start();
+  }
+
+  @override
+  void dispose() {
+    _totpController.dispose();
+    super.dispose();
+  }
+
+  /// Submits the credentials so Odoo hands out the TOTP form.
+  Future<TotpLoginResult> _startLogin() => _gate.guard(
+    _server,
+    () => _login.start(widget.username, widget.password),
+  );
+
+  Future<void> _start() async {
+    try {
+      await _apply(await _startLogin());
+    } on CfGateException catch (e) {
+      _fail(e.message);
+    } catch (_) {
+      _fail('Failed to load. Please check your connection and try again.');
+    }
+  }
+
+  void _fail(String message) {
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _verifying = false;
+      _error = message;
+    });
+  }
+
+  Future<void> _apply(TotpLoginResult result) async {
+    switch (result) {
+      case TotpCodeRequired():
+        if (mounted) setState(() => _loading = false);
+      case TotpLoginFailed(:final message):
+        _fail(message);
+      case TotpLoginSuccess(:final sessionId):
+        await _saveSessionData(sessionId);
+    }
   }
 
   @override
@@ -81,94 +124,6 @@ class _TotpPageState extends State<TotpPage> {
                     BlendMode.dstATop,
                   ),
                 ),
-              ),
-            ),
-          ),
-
-          Positioned.fill(
-            child: Opacity(
-              opacity: 0.0,
-              child: InAppWebView(
-                initialUrlRequest: URLRequest(
-                  url: WebUri(
-                    '${widget.serverUrl}/web/login?db=${widget.database}',
-                  ),
-                ),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled: true,
-                  cacheEnabled: false,
-                  clearCache: true,
-                  userAgent: OdooSessionManager.USER_AGENT,
-                  useHybridComposition: true,
-                  allowContentAccess: true,
-                  allowFileAccess: true,
-                  mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
-                  forceDark: ForceDark.AUTO,
-                  disableDefaultErrorPage: true,
-                ),
-                onWebViewCreated: (controller) {
-                  _webController = controller;
-                },
-                onReceivedServerTrustAuthRequest:
-                    (controller, challenge) async {
-                      return ServerTrustAuthResponse(
-                        action: ServerTrustAuthResponseAction.PROCEED,
-                      );
-                    },
-                onReceivedError: (controller, request, error) {
-                  if (mounted) {
-                    setState(() {
-                      _loading = false;
-                      _error = 'Failed to load: ${error.description}';
-                    });
-                  }
-                },
-                onLoadStop: (controller, url) async {
-                  final urlStr = url?.toString() ?? '';
-
-                  if (urlStr.contains('/web/database/selector') ||
-                      urlStr.contains('/web/database/manager')) {
-                    await _handleDatabaseSelector();
-                    return;
-                  }
-
-                  if (urlStr.contains('/web/login') && !_credentialsInjected) {
-                    await Future.delayed(const Duration(milliseconds: 800));
-                    await _injectCredentials();
-                    return;
-                  }
-
-                  if (urlStr.contains('/web/login/totp') ||
-                      urlStr.contains('totp_token')) {
-                    if (mounted) {
-                      setState(() {
-                        _loading = false;
-                      });
-                    }
-                    await Future.delayed(const Duration(milliseconds: 600));
-                    await _focusTotpField();
-                    return;
-                  }
-
-                  if (_isSignedInUrl(urlStr)) {
-                    final sessionInfo = await controller.evaluateJavascript(
-                      source: """
-                      (function () {
-                        return odoo && odoo.session_info ? odoo.session_info : null;
-                      })();
-                      """,
-                    );
-                    final success = await _saveSessionData(
-                      sessionInfo: sessionInfo,
-                    );
-                    if (success && mounted) {
-                      setState(() {
-                        _loginSuccess = true;
-                        _loading = false;
-                      });
-                    }
-                  }
-                },
               ),
             ),
           ),
@@ -352,7 +307,7 @@ class _TotpPageState extends State<TotpPage> {
 
           AnimatedContainer(
             duration: const Duration(milliseconds: 300),
-            height: _error != null ? 48 : 0,
+            height: _error == null ? 0 : (_error!.contains('\n') ? 120 : 48),
             child: _error != null
                 ? Padding(
                     padding: const EdgeInsets.only(bottom: 8.0),
@@ -427,70 +382,8 @@ class _TotpPageState extends State<TotpPage> {
     );
   }
 
-  Future<void> _injectCredentials() async {
-    if (_credentialsInjected) return;
-
-    final safeUser = jsonEncode(widget.username);
-    final safePass = jsonEncode(widget.password);
-    final safeDb = jsonEncode(widget.database);
-
-    await _webController?.evaluateJavascript(
-      source:
-          """
-      (function() {
-        const login = document.querySelector('input[name="login"], input[type="email"]');
-        const password = document.querySelector('input[name="password"]');
-        const db = document.querySelector('input[name="db"], select[name="db"]');
-        const form = document.querySelector('form[action*="/web/login"]');
-
-        if (!login || !password || !form) return "missing";
-
-        login.value = $safeUser;
-        password.value = $safePass;
-        if (db) {
-          if (db.tagName === 'INPUT') db.value = $safeDb;
-          else db.value = $safeDb;
-        }
-
-        const btn = form.querySelector('button[type="submit"]');
-        if (btn) btn.click();
-        else form.requestSubmit();
-
-        return "submitted";
-      })();
-    """,
-    );
-    _credentialsInjected = true;
-  }
-
-  Future<void> _handleDatabaseSelector() async {
-    await _webController?.evaluateJavascript(
-      source:
-          """
-      const select = document.querySelector('select[name="db"]');
-      if (select) {
-        select.value = '${widget.database}';
-        const btn = document.querySelector('button[type="submit"]');
-        if (btn) btn.click();
-      }
-    """,
-    );
-  }
-
-  Future<void> _focusTotpField() async {
-    await _webController?.evaluateJavascript(
-      source: """
-      const input = document.querySelector('input[name="totp_token"], input[autocomplete="one-time-code"]');
-      if (input) {
-        input.focus();
-        input.select();
-      }
-    """,
-    );
-  }
-
   Future<void> _submitTotp() async {
-    if (_verifying || _webController == null) return;
+    if (_verifying) return;
 
     setState(() {
       _verifying = true;
@@ -507,134 +400,19 @@ class _TotpPageState extends State<TotpPage> {
     }
 
     try {
-      await _webController!.evaluateJavascript(
-        source:
-            """
-        (function() {
-          let input = document.querySelector(
-            'input[name="totp_token"], input[autocomplete="one-time-code"], input[type="text"][maxlength="6"], input[type="number"][maxlength="6"]'
-          );
-          if (!input) return "totp_input_not_found";
-          
-          
-          input.focus();
-          input.value = '$totp';
-          ['input', 'change', 'keydown', 'keyup', 'keypress'].forEach(eventType => {
-            input.dispatchEvent(new KeyboardEvent(eventType, {key: 'Enter', bubbles: true, cancelable: true}));
-          });
-          
-          
-          const trustCheckbox = document.querySelector('input[name="trust_device"], input[type="checkbox"], [name="trust"]');
-          if (trustCheckbox && !trustCheckbox.checked) {
-            trustCheckbox.checked = true;
-            trustCheckbox.dispatchEvent(new Event('change', {bubbles: true}));
-          }
-          
-          
-          const form = input.closest('form') || document.querySelector('form[action*="/web/login"]');
-          if (form) {
-            const btn = form.querySelector('button[type="submit"], button.btn-primary, button[name="submit"], button.btn-block');
-            if (btn) {
-              btn.click();
-            } else {
-              form.submit();  
-            }
-            return "totp_submitted";
-          }
-          return "form_not_found";
-        })();
-      """,
-      );
-
-      await Future.delayed(const Duration(seconds: 2));
-
-      for (int i = 0; i < 20; i++) {
-        final isLoggedIn = await _webController!.evaluateJavascript(
-          source: """
-          (function() {
-            const userMenu = document.querySelector('.o_user_menu, .oe_topbar_avatar, .o_apps_switcher, [data-menu="account"]');
-            const webClient = document.querySelector('.o_web_client, .o_action_manager');
-            const error = document.querySelector('.alert-danger, .o_error_dialog');
-            if (userMenu || webClient) return true;
-            if (error) return 'error';
-            return false;
-          })();
-          """,
-        );
-        if (isLoggedIn == 'error') {
-          setState(
-            () => _error = "Invalid code or login failed. Please try again.",
-          );
-          return;
-        }
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-
-      await Future.delayed(const Duration(seconds: 4));
-
-      final currentUrl = await _webController!.getUrl();
-      final urlStr = currentUrl?.toString() ?? '';
-
-      final cookies = await CookieManager.instance().getCookies(
-        url: currentUrl!,
-      );
-
-      final sessionCookie = cookies.firstWhere(
-        (c) => c.name == 'session_id',
-        orElse: () => Cookie(name: 'session_id', value: ''),
-      );
-
-      final sessionInfo = await _webController!.evaluateJavascript(
-        source: """
-        (function () {
-          return odoo && odoo.session_info ? odoo.session_info : null;
-        })();
-      """,
-      );
-
-      final domSuccess = await _webController!.evaluateJavascript(
-        source: """
-        (function() {
-          const hasUserMenu = !!document.querySelector('.o_user_menu, .oe_topbar_avatar');
-          const hasWebClient = !!document.querySelector('.o_web_client');
-          return hasUserMenu || hasWebClient;
-        })();
-      """,
-      );
-
-      bool success = false;
-      if (domSuccess == true || _isSignedInUrl(urlStr)) {
-        success = await _saveSessionData(sessionInfo: sessionInfo);
-      }
-
-      if (success) {
-        await _onLoginSuccess();
-        return;
-      }
-
-      if (!success) {
-        final isSuccess =
-            sessionCookie.value.isNotEmpty &&
-            sessionCookie.value.length > 20 &&
-            _isSignedInUrl(urlStr);
-
-        if (!isSuccess) {
-          if (mounted) {
-            setState(() {
-              _error = 'Invalid code or login failed. Please try again.';
-              _verifying = false;
-            });
-          }
+      // A failed first step (e.g. no network at open) is redone here.
+      if (!_login.awaitingCode) {
+        final started = await _startLogin();
+        if (started is! TotpCodeRequired) {
+          await _apply(started);
           return;
         }
       }
+      await _apply(await _gate.guard(_server, () => _login.submitCode(totp)));
+    } on CfGateException catch (e) {
+      _fail(e.message);
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Authentication failed. Please try again.';
-          _verifying = false;
-        });
-      }
+      _fail('Authentication failed. Please try again.');
     } finally {
       if (mounted && !_loginSuccess) {
         setState(() {
@@ -701,58 +479,32 @@ class _TotpPageState extends State<TotpPage> {
     }
   }
 
-  Future<bool> _saveSessionData({Map<String, dynamic>? sessionInfo}) async {
-    if (_isSessionExtracted) return true;
+  /// Hands the Odoo `session_id` to the regular session setup.
+  Future<void> _saveSessionData(String sessionId) async {
+    if (_isSessionExtracted) return;
 
     try {
-      final currentUrl = await _webController?.getUrl();
-      final cookies = await CookieManager.instance().getCookies(
-        url: currentUrl ?? WebUri(widget.serverUrl),
-      );
-
-      final sessionCookie = cookies.firstWhere(
-        (cookie) => cookie.name == 'session_id',
-        orElse: () => Cookie(name: '', value: ''),
-      );
-
-      if (sessionCookie.value.isNotEmpty) {
-        if (!mounted) return false;
-        final authService = AuthService();
-        final success = await authService.loginWithSessionId(
+      final success = await _gate.guard(
+        _server,
+        () => AuthService().loginWithSessionId(
           serverUrl: widget.serverUrl,
           database: widget.database,
           userLogin: widget.username.trim(),
           password: widget.password.trim(),
-          sessionId: sessionCookie.value,
-          sessionInfo: sessionInfo,
-        );
-
-        if (success) {
-          _isSessionExtracted = true;
-          return true;
-        } else {
-          if (mounted && !_verifying) {
-            setState(() {
-              _error = 'Invalid code or login failed. Please try again.';
-            });
-          }
-          return false;
-        }
+          sessionId: sessionId,
+        ),
+      );
+      if (success) {
+        _isSessionExtracted = true;
+        await _onLoginSuccess();
       } else {
-        if (mounted && !_verifying) {
-          setState(() {
-            _error = 'Invalid code or login failed. Please try again.';
-          });
-        }
-        return false;
+        _fail('Code accepted, but loading your Odoo session failed.');
       }
+    } on CfGateException catch (e) {
+      _fail(e.message);
     } catch (e) {
-      if (mounted && !_verifying) {
-        setState(() {
-          _error = 'Invalid code or login failed. Please try again.';
-        });
-      }
-      return false;
+      debugPrint('[TotpPage] session handoff failed: $e');
+      _fail('Invalid code or login failed. Please try again.');
     }
   }
 }

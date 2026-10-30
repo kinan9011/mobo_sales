@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:mobo_sales/utils/app_theme.dart';
+import 'package:mobo_sales/utils/odoo_image_headers.dart';
 import '../models/contact.dart';
 
 class CustomerListTile extends StatelessWidget {
@@ -194,6 +195,7 @@ class CustomerListTile extends StatelessWidget {
       if (imageUrl.startsWith('http')) {
         return CachedNetworkImage(
           imageUrl: imageUrl,
+          httpHeaders: odooImageHeaders(imageUrl),
           width: 60,
           height: 60,
           fit: BoxFit.cover,

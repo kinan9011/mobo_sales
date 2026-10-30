@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:provider/provider.dart';
 import 'package:mobo_sales/utils/app_theme.dart';
+import 'package:mobo_sales/utils/odoo_image_headers.dart';
 import '../providers/currency_provider.dart';
 
 class ProductListTile extends StatelessWidget {
@@ -288,6 +289,7 @@ class ProductListTile extends StatelessWidget {
       if (imageUrl!.startsWith('http')) {
         imageWidget = CachedNetworkImage(
           imageUrl: imageUrl!,
+          httpHeaders: odooImageHeaders(imageUrl!),
           width: 60,
           height: 60,
           fit: BoxFit.cover,

@@ -5,6 +5,7 @@ import '../../models/product.dart';
 import '../../services/product_service.dart';
 import '../../widgets/confetti_dialogs.dart';
 import '../../utils/data_loss_warning_mixin.dart';
+import '../../utils/odoo_image_headers.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
@@ -1367,7 +1368,10 @@ class _CreateProductScreenState extends State<CreateProductScreen>
           backgroundColor: isDark
               ? Colors.grey.shade200
               : Theme.of(context).primaryColor.withOpacity(.1),
-          backgroundImage: NetworkImage(imageUrl),
+          backgroundImage: NetworkImage(
+            imageUrl,
+            headers: odooImageHeaders(imageUrl),
+          ),
         );
       } else {
         try {

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:provider/provider.dart';
 import '../../providers/login_provider.dart';
 import 'credentials_screen.dart';
@@ -276,12 +277,41 @@ class _ServerSetupScreenState extends State<ServerSetupScreen>
 
                   LoginErrorDisplay(error: inlineError),
 
-                  LoginButton(
-                    text: 'Next',
-                    onPressed: _canProceedToCredentials(provider)
-                        ? () => _goToCredentials(provider)
-                        : null,
-                  ),
+                  if (provider.cfSignInRequired)
+                    LoginButton(
+                      text: 'Sign in with your organization',
+                      isLoading: provider.isCfSigningIn,
+                      loadingWidget: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              'Signing in with your organization',
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.manrope(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          LoadingAnimationWidget.staggeredDotsWave(
+                            color: Colors.white,
+                            size: 28,
+                          ),
+                        ],
+                      ),
+                      onPressed: provider.isLoadingDatabases
+                          ? null
+                          : provider.signInWithOrganization,
+                    )
+                  else
+                    LoginButton(
+                      text: 'Next',
+                      onPressed: _canProceedToCredentials(provider)
+                          ? () => _goToCredentials(provider)
+                          : null,
+                    ),
                 ],
               ),
             ),
@@ -291,5 +321,3 @@ class _ServerSetupScreenState extends State<ServerSetupScreen>
     );
   }
 }
-
-

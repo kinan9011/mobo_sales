@@ -3,6 +3,7 @@ import 'package:hugeicons/hugeicons.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../services/odoo_session_manager.dart';
 import 'package:provider/provider.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/session_service.dart';
@@ -114,7 +115,12 @@ class _InAppWebViewScreenState extends State<InAppWebViewScreen> {
                 child: _errorMessage != null
                     ? _buildErrorState(context)
                     : InAppWebView(
-                        initialUrlRequest: URLRequest(url: WebUri(widget.url)),
+                        // Only this first request carries the Cloudflare bearer; subresource
+                        // and XHR requests inside a WebView cannot.
+                        initialUrlRequest: URLRequest(
+                          url: WebUri(widget.url),
+                          headers: OdooSessionManager.bearerHeaders(widget.url),
+                        ),
                         initialSettings: InAppWebViewSettings(
                           javaScriptEnabled: true,
                           useHybridComposition: true,

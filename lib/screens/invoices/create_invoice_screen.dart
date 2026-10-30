@@ -19,6 +19,7 @@ import '../../providers/currency_provider.dart';
 import '../../providers/invoice_creation_provider.dart';
 import '../../widgets/confetti_dialogs.dart';
 import '../../utils/data_loss_warning_mixin.dart';
+import '../../utils/odoo_image_headers.dart';
 import '../../providers/contact_provider.dart';
 import '../../widgets/custom_text_field.dart';
 import '../../widgets/custom_dropdown.dart';
@@ -724,6 +725,7 @@ class _CreateInvoiceScreenState extends State<CreateInvoiceScreen>
                           child: customer.imageUrl!.startsWith('http')
                               ? Image.network(
                                   customer.imageUrl!,
+                                  headers: odooImageHeaders(customer.imageUrl!),
                                   width: 40,
                                   height: 40,
                                   fit: BoxFit.cover,
@@ -4015,6 +4017,7 @@ class _ProductSelectionSheetState extends State<_ProductSelectionSheet> {
   Widget _buildFadeInNetworkImage(String imageUrl, String name) {
     return CachedNetworkImage(
       imageUrl: imageUrl,
+      httpHeaders: odooImageHeaders(imageUrl),
       width: 60,
       height: 60,
       fit: BoxFit.cover,

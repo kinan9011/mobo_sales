@@ -19,6 +19,7 @@ import '../../widgets/connection_status_widget.dart';
 import '../../widgets/custom_snackbar.dart';
 import '../../widgets/list_shimmer.dart';
 import '../../widgets/product_list_tile.dart';
+import '../../utils/odoo_image_headers.dart';
 import 'package:flutter/services.dart';
 
 class StockCheckPage extends StatefulWidget {
@@ -35,7 +36,6 @@ class _StockCheckPageState extends State<StockCheckPage> {
   List<Map<String, dynamic>> _productTemplates = [];
   List<Map<String, dynamic>> _filteredProductTemplates = [];
   final TextEditingController _searchController = TextEditingController();
-  OdooSession? _sessionId;
 
   final ScrollController _scrollController = ScrollController();
   int _currentPage = 0;
@@ -107,9 +107,7 @@ class _StockCheckPageState extends State<StockCheckPage> {
             ? (imageUrl.startsWith('http')
                   ? CachedNetworkImage(
                       imageUrl: imageUrl,
-                      httpHeaders: _sessionId != null
-                          ? {"Cookie": "session_id=$_sessionId"}
-                          : null,
+                      httpHeaders: odooImageHeaders(imageUrl),
                       width: 60,
                       height: 60,
                       fit: BoxFit.cover,
@@ -425,7 +423,6 @@ class _StockCheckPageState extends State<StockCheckPage> {
       if (client == null) {
         throw Exception('No active Odoo session found. Please log in again.');
       }
-      _sessionId = client.sessionId;
 
       List<dynamic> domain = [
         ['active', '=', true],

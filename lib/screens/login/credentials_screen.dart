@@ -8,8 +8,10 @@ import 'package:loading_animation_widget/loading_animation_widget.dart';
 import '../../providers/login_provider.dart';
 import 'reset_password_screen.dart';
 import 'login_layout.dart';
+import '../../services/cf_access/cf_access_gate.dart';
 import '../../services/session_service.dart';
 import '../../services/odoo_session_manager.dart';
+import '../../services/shared_http.dart';
 import '../../services/biometric_context_service.dart';
 
 class CredentialsScreen extends StatefulWidget {
@@ -32,6 +34,7 @@ class CredentialsScreen extends StatefulWidget {
 
 class _CredentialsScreenState extends State<CredentialsScreen> {
   late LoginProvider _provider;
+  final _cfGate = CfAccessGate(SharedHttp.auth);
 
   bool _shouldValidate = false;
 
@@ -77,11 +80,16 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
 
   Future<bool> _addNewAccount(LoginProvider provider) async {
     try {
-      final newSession = await OdooSessionManager.authenticate(
-        serverUrl: widget.url,
-        database: widget.database,
-        username: provider.emailController.text.trim(),
-        password: provider.passwordController.text,
+      final server = Uri.parse(widget.url);
+      await _cfGate.ensureAccess(server);
+      final newSession = await _cfGate.guard(
+        server,
+        () => OdooSessionManager.authenticate(
+          serverUrl: widget.url,
+          database: widget.database,
+          username: provider.emailController.text.trim(),
+          password: provider.passwordController.text,
+        ),
       );
 
       if (newSession == null) {
@@ -99,6 +107,9 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
       TextInput.finishAutofillContext();
 
       return true;
+    } on CfGateException catch (e) {
+      provider.errorMessage = e.message;
+      return false;
     } catch (e) {
       provider.errorMessage = 'Failed to add account: ${e.toString()}';
       return false;

@@ -45,7 +45,9 @@ class QuotationService {
         'uid': session.userId ?? 0,
         'allowed_company_ids': session.allowedCompanyIds.isNotEmpty
             ? session.allowedCompanyIds
-            : (session.selectedCompanyId != null ? [session.selectedCompanyId!] : []),
+            : (session.selectedCompanyId != null
+                  ? [session.selectedCompanyId!]
+                  : []),
         'active_model': 'sale.order',
         'active_id': orderId,
         'active_ids': [orderId],

@@ -1968,18 +1968,16 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen>
         launchUri = Uri.parse('mailto:$raw');
       }
 
-      if (launchUri != null) {
+      final target = launchUri;
+      if (target != null) {
         spans.add(
           TextSpan(
             text: display,
             style: linkStyle,
             recognizer: TapGestureRecognizer()
               ..onTap = () async {
-                if (await canLaunchUrl(launchUri!)) {
-                  await launchUrl(
-                    launchUri,
-                    mode: LaunchMode.externalApplication,
-                  );
+                if (await canLaunchUrl(target)) {
+                  await launchUrl(target, mode: LaunchMode.externalApplication);
                 } else {
                   CustomSnackbar.showError(context, 'Could not open the link');
                 }

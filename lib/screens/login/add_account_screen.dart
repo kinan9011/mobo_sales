@@ -8,6 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/session_service.dart';
 import '../../services/odoo_session_manager.dart';
 import '../../services/odoo_api_service.dart';
+import '../../services/cf_access/cf_access_gate.dart';
+import '../../services/shared_http.dart';
+import '../../utils/server_url_policy.dart';
 import 'login_layout.dart'
     show
         LoginLayout,
@@ -41,6 +44,9 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
   bool _obscurePassword = true;
   bool _isLoading = false;
   bool _isLoadingDatabases = false;
+  bool _cfSignInRequired = false;
+  bool _isCfSigningIn = false;
+  final _cfGate = CfAccessGate(SharedHttp.auth);
   bool _shouldValidate = false;
   bool _urlHasError = false;
   bool _dbHasError = false;
@@ -212,6 +218,7 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
         _selectedDatabase = null;
         _errorMessage = null;
         _isLoadingDatabases = false;
+        _cfSignInRequired = false;
       });
       return;
     }
@@ -222,6 +229,19 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
         _selectedDatabase = null;
         _errorMessage = 'Please enter a valid server URL';
         _isLoadingDatabases = false;
+        _cfSignInRequired = false;
+      });
+      return;
+    }
+
+    final insecureError = insecureServerUrlError(_normalizeUrl(trimmedUrl));
+    if (insecureError != null) {
+      setState(() {
+        _databases.clear();
+        _selectedDatabase = null;
+        _errorMessage = insecureError;
+        _isLoadingDatabases = false;
+        _cfSignInRequired = false;
       });
       return;
     }
@@ -237,16 +257,34 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
     try {
       final baseUrl = _normalizeUrl(trimmedUrl);
 
-      final databases = await OdooApiService()
-          .listDatabasesForUrl(baseUrl)
-          .timeout(
-            const Duration(seconds: 15),
-            onTimeout: () {
-              throw Exception(
-                'Connection timeout. Please check your internet connection.',
-              );
-            },
-          );
+      final status = await _cfGate.check(Uri.parse(baseUrl));
+      if (!mounted) return;
+      if (status != CfGateStatus.open) {
+        setState(() {
+          _isLoadingDatabases = false;
+          _cfSignInRequired = status == CfGateStatus.signInRequired;
+          _databases.clear();
+          _selectedDatabase = null;
+          _errorMessage = CfAccessGate.messageFor(status);
+          _dbInfoMessage = null;
+        });
+        return;
+      }
+      _cfSignInRequired = false;
+
+      final databases = await _cfGate.guard(
+        Uri.parse(baseUrl),
+        () => OdooApiService()
+            .listDatabasesForUrl(baseUrl)
+            .timeout(
+              const Duration(seconds: 15),
+              onTimeout: () {
+                throw Exception(
+                  'Connection timeout. Please check your internet connection.',
+                );
+              },
+            ),
+      );
 
       if (!mounted) return;
 
@@ -286,13 +324,24 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
           }
         });
       }
+    } on CfGateException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingDatabases = false;
+        _databases.clear();
+        _selectedDatabase = null;
+        _errorMessage = e.message;
+        _dbInfoMessage = null;
+      });
     } catch (e) {
       if (!mounted) return;
       final errStr = e.toString();
       String errorMessage =
           'Could not connect to server. Please check the URL and try again.';
 
-      if (errStr.contains('timeout') ||
+      if (tlsErrorMessage(e) != null) {
+        errorMessage = tlsFailureMessage;
+      } else if (errStr.contains('timeout') ||
           errStr.contains('Connection timeout')) {
         errorMessage =
             'Connection timeout. Please check your internet connection and try again.';
@@ -305,8 +354,7 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
             'Unable to connect to server. Check URL and network connection.';
       } else if (errStr.contains('FormatException') ||
           errStr.contains('Invalid')) {
-        errorMessage =
-            'Invalid server URL format. Please check and try again.';
+        errorMessage = 'Invalid server URL format. Please check and try again.';
       } else if (errStr.contains('ACCESS_DENIED_DB_LIST')) {
         errorMessage =
             'Database listing is disabled (list_db=false). Cannot fetch databases automatically.';
@@ -335,6 +383,28 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
     }
   }
 
+  /// Signs in to Cloudflare Access in the system browser, then loads the
+  /// database list. Also the retry after a cancelled or failed sign-in.
+  Future<void> _signInWithOrganization() async {
+    setState(() {
+      _isCfSigningIn = true;
+      _errorMessage = null;
+    });
+    try {
+      await _cfGate.signIn(Uri.parse(_normalizeUrl(_urlController.text)));
+    } on CfGateException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isCfSigningIn = false;
+        _errorMessage = e.message;
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _isCfSigningIn = false);
+    await _validateUrlAndFetchDatabases();
+  }
+
   String _getFullUrl() {
     final url = _urlController.text.trim();
     if (url.isEmpty) return '';
@@ -357,17 +427,29 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
       return;
     }
 
+    final insecureError = insecureServerUrlError(fullUrl);
+    if (insecureError != null) {
+      setState(() {
+        _errorMessage = insecureError;
+        _isLoading = false;
+      });
+      return;
+    }
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
     try {
-      final newSession = await OdooSessionManager.authenticate(
-        serverUrl: fullUrl,
-        database: finalDb,
-        username: _emailController.text.trim(),
-        password: _passwordController.text,
+      final newSession = await _cfGate.guard(
+        Uri.parse(fullUrl),
+        () => OdooSessionManager.authenticate(
+          serverUrl: fullUrl,
+          database: finalDb,
+          username: _emailController.text.trim(),
+          password: _passwordController.text,
+        ),
       );
 
       if (newSession == null) {
@@ -410,6 +492,12 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
           context,
           'Account added and switched successfully',
         );
+      });
+    } on CfGateException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
       });
     } catch (e) {
       final errorStr = e.toString().toLowerCase();
@@ -491,6 +579,9 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
   }
 
   String _parseLoginError(String error) {
+    final tlsError = tlsErrorMessage(error);
+    if (tlsError != null) return tlsError;
+
     final errorLower = error.toLowerCase();
 
     if (errorLower.contains('access denied') ||
@@ -590,7 +681,8 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
               LoginUrlAutocompleteField(
                 controller: _urlController,
                 suggestions: _urlHistory,
-                onSuggestionSelected: (selection) => _setUrlFromFullUrl(selection),
+                onSuggestionSelected: (selection) =>
+                    _setUrlFromFullUrl(selection),
                 child: LoginUrlTextField(
                   controller: _urlController,
                   hint: 'Server Address',
@@ -622,11 +714,14 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                       _errorMessage = null;
                     });
 
-                    _debounceTimer = Timer(const Duration(milliseconds: 700), () {
-                      if (mounted) {
-                        _validateUrlAndFetchDatabases();
-                      }
-                    });
+                    _debounceTimer = Timer(
+                      const Duration(milliseconds: 700),
+                      () {
+                        if (mounted) {
+                          _validateUrlAndFetchDatabases();
+                        }
+                      },
+                    );
                   },
                 ),
               ),
@@ -676,31 +771,63 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
 
               LoginErrorDisplay(error: _inlineError),
 
-              LoginButton(
-                text: 'Next',
-                isLoading: _isLoadingDatabases,
-                onPressed: (!_isLoadingDatabases) && (_selectedDatabase != null)
-                    ? () {
-                        setState(() {
-                          _shouldValidate = true;
-                        });
-                        final canProceed = _selectedDatabase != null;
-                        if (canProceed) {
+              if (_cfSignInRequired)
+                LoginButton(
+                  text: 'Sign in with your organization',
+                  isLoading: _isCfSigningIn,
+                  loadingWidget: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          'Signing in with your organization',
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.manrope(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      LoadingAnimationWidget.staggeredDotsWave(
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                    ],
+                  ),
+                  onPressed: _isLoadingDatabases
+                      ? null
+                      : _signInWithOrganization,
+                )
+              else
+                LoginButton(
+                  text: 'Next',
+                  isLoading: _isLoadingDatabases,
+                  onPressed:
+                      (!_isLoadingDatabases) && (_selectedDatabase != null)
+                      ? () {
                           setState(() {
-                            _currentStep = AddAccountStep.credentials;
-                            _shouldValidate = false;
-                            _errorMessage = null;
-                            _inlineError = null;
+                            _shouldValidate = true;
                           });
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (mounted) {
-                              FocusScope.of(context).requestFocus(_emailFocus);
-                            }
-                          });
+                          final canProceed = _selectedDatabase != null;
+                          if (canProceed) {
+                            setState(() {
+                              _currentStep = AddAccountStep.credentials;
+                              _shouldValidate = false;
+                              _errorMessage = null;
+                              _inlineError = null;
+                            });
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted) {
+                                FocusScope.of(
+                                  context,
+                                ).requestFocus(_emailFocus);
+                              }
+                            });
+                          }
                         }
-                      }
-                    : null,
-              ),
+                      : null,
+                ),
             ] else ...[
               AutofillGroup(
                 child: Column(

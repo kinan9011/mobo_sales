@@ -13,8 +13,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/login/server_setup_screen.dart';
 import 'screens/others/webview_screen.dart';
 import 'screens/others/get_started_screen.dart';
+import 'services/cf_access/cf_access_gate.dart';
 import 'services/connectivity_service.dart';
+import 'services/secrets_migration.dart';
 import 'services/session_service.dart';
+import 'services/shared_http.dart';
 import 'package:provider/provider.dart';
 import 'providers/theme_provider.dart';
 import 'providers/contact_provider.dart';
@@ -33,7 +36,11 @@ final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
 final RouteObserver<ModalRoute<void>> routeObserver =
     RouteObserver<ModalRoute<void>>();
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Before any provider can read the stored session or accounts.
+  await migrateSecretsToSecureStorage();
+  SharedHttp.expiry.events.listen(_onCfAccessExpired);
   runApp(
     MultiProvider(
       providers: [
@@ -55,6 +62,54 @@ void main() {
       child: const MyApp(),
     ),
   );
+}
+
+/// A Cloudflare Access session could not be renewed during normal use: ask
+/// the user to sign in again (usually silent through the browser session),
+/// and fall back to a local logout. Never runs twice at once: the notifier
+/// stays open until [CfExpiryNotifier.resolve] in the `finally`.
+Future<void> _onCfAccessExpired(String host) async {
+  final session = SessionService.instance;
+  final current = session.currentSession;
+  final dialogContext = navigatorKey.currentState?.overlay?.context;
+  final sameHost =
+      current != null &&
+      Uri.tryParse(current.serverUrl)?.host.toLowerCase() == host.toLowerCase();
+  // Login flows handle their own expiry through CfAccessGate.guard.
+  if (!sameHost ||
+      session.isLoggingOut ||
+      dialogContext == null ||
+      !dialogContext.mounted) {
+    SharedHttp.expiry.resolve();
+    return;
+  }
+
+  try {
+    await showDialog<void>(
+      context: dialogContext,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('Your organization sign-in expired'),
+          content: const Text('Sign in again to continue using the app.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Sign in'),
+            ),
+          ],
+        ),
+      ),
+    );
+    await CfAccessGate(SharedHttp.auth).signIn(Uri.parse(current.serverUrl));
+  } catch (_) {
+    // Cancelled or failed: leave without waiting on the network.
+    unawaited(session.logout(showNotice: false, remote: false));
+    navigatorKey.currentState?.pushNamedAndRemoveUntil('/login', (_) => false);
+  } finally {
+    SharedHttp.expiry.resolve();
+  }
 }
 
 class MyApp extends StatelessWidget {

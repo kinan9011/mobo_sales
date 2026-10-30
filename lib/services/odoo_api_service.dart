@@ -27,7 +27,7 @@ class OdooApiService {
   Future<List<String>> listDatabasesForUrl(String baseUrl) async {
     try {
       final uri = Uri.parse('$baseUrl/web/database/list');
-      final response = await http
+      final response = await OdooSessionManager.ioClient
           .post(
             uri,
             headers: {'Content-Type': 'application/json'},
@@ -69,7 +69,7 @@ class OdooApiService {
         cleanUrl = cleanUrl.substring(0, cleanUrl.length - 5);
       }
 
-      final client = http.Client();
+      final client = OdooSessionManager.ioClient;
 
       String cookieHeader = '';
 
@@ -332,7 +332,10 @@ class OdooApiService {
       }
 
       try {
-        final rpcClient = OdooClient(cleanUrl);
+        final rpcClient = OdooClient(
+          cleanUrl,
+          httpClient: OdooSessionManager.ioClient,
+        );
 
         final info = await rpcClient.callRPC(
           '/web/session/get_session_info',
@@ -356,6 +359,7 @@ class OdooApiService {
     }
     return null;
   }
+
   static String? _extractDbFromCookies(String? setCookie) {
     if (setCookie == null) return null;
 
@@ -379,6 +383,7 @@ class OdooApiService {
 
     return null;
   }
+
   static String? _extractDbFromHtml(String body) {
     try {
       final assignmentMatch = RegExp(
@@ -523,11 +528,12 @@ class OdooApiService {
     } catch (_) {}
     return null;
   }
+
   static Future<String?> _probeDbWithRpc(
     String baseUrl, {
     String? cookies,
   }) async {
-    final client = http.Client();
+    final client = OdooSessionManager.ioClient;
     try {
       final uri = Uri.parse('$baseUrl/web/session/get_session_info');
 
@@ -691,6 +697,7 @@ class OdooApiService {
     }
     return null;
   }
+
   static const String _userAgent =
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 }

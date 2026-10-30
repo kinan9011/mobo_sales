@@ -78,6 +78,9 @@ dependencies:
 
   # Authentication
   local_auth: ^2.3.0
+  flutter_web_auth_2: ^5.1.0
+  flutter_secure_storage: ^10.3.4
+  crypto: ^3.0.8
 
   # AI and OCR
   google_mlkit_text_recognition: ^0.15.0

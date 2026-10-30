@@ -1,11 +1,15 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:odoo_rpc/odoo_rpc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart' as webview;
+import '../utils/cf_host_release.dart';
+import 'remote_sign_out.dart';
+import 'secret_store.dart';
+import 'shared_http.dart';
 
 /// Value object that holds all data for an active Odoo user session.
 class OdooSessionModel {
@@ -110,9 +114,12 @@ class OdooSessionModel {
 
     final biometricEnabled = prefs.getBool('biometric_enabled');
 
-    await prefs.setString('sessionId', sessionId);
+    // Secrets live in secure storage, never in prefs.
+    await SecretStore.instance.write('sessionId', sessionId);
+    await SecretStore.instance.write('password', password);
+    await prefs.remove('sessionId');
+    await prefs.remove('password');
     await prefs.setString('userLogin', userLogin);
-    await prefs.setString('password', password);
     await prefs.setString('database', database);
     await prefs.setString('serverUrl', serverUrl);
     if (userId != null) {
@@ -152,9 +159,15 @@ class OdooSessionModel {
       return null;
     }
 
-    final sessionId = prefs.getString('sessionId');
+    String? sessionId;
+    String? password;
+    try {
+      sessionId = await SecretStore.instance.read('sessionId');
+      password = await SecretStore.instance.read('password');
+    } catch (_) {
+      return null;
+    }
     final userLogin = prefs.getString('userLogin');
-    final password = prefs.getString('password');
     final rawServerUrl = prefs.getString('serverUrl');
     final database = prefs.getString('database');
     final userId = prefs.getInt('userId');
@@ -206,43 +219,10 @@ class OdooSessionModel {
   }
 }
 
-/// HTTP client wrapper that enforces an overall timeout on every request,
-/// bounding the wait for the server's response (which `connectionTimeout`
-/// alone does not) so a stalled response can never hang the UI indefinitely.
-class _TimeoutHttpClient extends http.BaseClient {
-  _TimeoutHttpClient(this._inner, this._timeout);
-
-  final http.Client _inner;
-  final Duration _timeout;
-
-  @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) {
-    return _inner.send(request).timeout(_timeout);
-  }
-
-  @override
-  void close() => _inner.close();
-}
-
 /// Manages the low-level Odoo RPC client, session caching, and authentication.
 class OdooSessionManager {
-  static final http.BaseClient ioClient = _getHttpClient();
-
-  /// Maximum time to wait for a server response before failing with a
-  /// [TimeoutException]. Kept generous because creating a `sale.order` is a
-  /// heavy server-side operation, but bounded so the UI never hangs forever.
-  static const Duration _requestTimeout = Duration(seconds: 60);
-
-  /// Maximum time to wait while establishing the TCP connection.
-  static const Duration _connectionTimeout = Duration(seconds: 30);
-
-  static http.BaseClient _getHttpClient() {
-    final HttpClient client = HttpClient()
-      ..connectionTimeout = _connectionTimeout
-      ..badCertificateCallback =
-          ((X509Certificate cert, String host, int port) => true);
-    return _TimeoutHttpClient(IOClient(client), _requestTimeout);
-  }
+  /// The app-wide shared client (timeouts, Cloudflare bearer injection).
+  static http.BaseClient get ioClient => SharedHttp.client;
 
   static const String USER_AGENT =
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -409,8 +389,33 @@ class OdooSessionManager {
   }
 
   /// Clears all session preferences and invalidates the cached client.
-  static Future<void> logout() async {
+  ///
+  /// Before that, best-effort and time-bounded: destroys the Odoo session
+  /// while the Cloudflare bearer is still valid, then revokes and deletes the
+  /// Cloudflare tokens of [cfHosts] (default: the current host, only when no
+  /// other stored account uses it). [cfReleaseAll] wipes every host's tokens.
+  /// [remote] false skips the network and only deletes tokens locally.
+  static Future<void> logout({
+    Iterable<String>? cfHosts,
+    bool cfReleaseAll = false,
+    bool remote = true,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
+
+    try {
+      final session = await getCurrentSession();
+      final server = session == null ? null : Uri.tryParse(session.serverUrl);
+      await remoteSignOut(
+        client: ioClient,
+        auth: SharedHttp.auth,
+        odooServer: server != null && server.host.isNotEmpty ? server : null,
+        sessionId: session?.sessionId,
+        releaseHosts:
+            cfHosts ?? _currentHostIfUnshared(prefs, session) ?? const [],
+        releaseAll: cfReleaseAll,
+        remote: remote,
+      );
+    } catch (_) {}
 
     const keysToRemove = <String>[
       'isLoggedIn',
@@ -427,6 +432,10 @@ class OdooSessionManager {
     for (final k in keysToRemove) {
       await prefs.remove(k);
     }
+    try {
+      await SecretStore.instance.delete('sessionId');
+      await SecretStore.instance.delete('password');
+    } catch (_) {}
 
     try {
       await webview.CookieManager.instance().deleteAllCookies().timeout(
@@ -440,6 +449,28 @@ class OdooSessionManager {
     if (_onSessionCleared != null) {
       _onSessionCleared!();
     }
+  }
+
+  /// The current session's host, unless another stored account uses it too.
+  static Set<String>? _currentHostIfUnshared(
+    SharedPreferences prefs,
+    OdooSessionModel? session,
+  ) {
+    if (session == null) return null;
+    final others = <Map<String, dynamic>>[];
+    for (final raw in prefs.getStringList('stored_accounts') ?? <String>[]) {
+      try {
+        final account = Map<String, dynamic>.from(jsonDecode(raw));
+        final isCurrent =
+            account['userId']?.toString() == session.userId?.toString() &&
+            account['serverUrl'] == session.serverUrl &&
+            account['database'] == session.database;
+        if (!isCurrent) others.add(account);
+      } catch (_) {}
+    }
+    return hostsToReleaseAfterRemoval(others, {
+      'serverUrl': session.serverUrl,
+    }, null);
   }
 
   /// Invalidates the in-memory client and session cache.
@@ -560,6 +591,7 @@ class OdooSessionManager {
 
       return true;
     } catch (e) {
+      debugPrint('[OdooSessionManager] loginWithSessionId failed: $e');
       return false;
     }
   }
@@ -695,7 +727,7 @@ class OdooSessionManager {
           )) {
             try {
               final uri = Uri.parse('$normalizedUrl/web/session/authenticate');
-              final response = await http.post(
+              final response = await ioClient.post(
                 uri,
                 headers: {'Content-Type': 'application/json'},
                 body: jsonEncode({
@@ -1304,6 +1336,62 @@ class OdooSessionManager {
     return getClient();
   }
 
+  /// Headers for fetching an authenticated Odoo resource at [url] (images,
+  /// attachments): session cookie plus, when the host has Cloudflare Access
+  /// tokens, `Authorization: Bearer`. Synchronous for widgets such as
+  /// `CachedNetworkImage`: the bearer comes from the shared client's in-memory
+  /// token cache, which a request to the host fills; on a cold or stale cache
+  /// a refresh is started so the next build carries it.
+  static Map<String, String> authHeaders(String url, {String? sessionId}) {
+    final sid = sessionId ?? _cachedSession?.sessionId;
+    final host = _bearerHost(url);
+    final access = SharedHttp.client.cachedAuthHeader(host);
+    if (access.isEmpty && host.isNotEmpty) {
+      SharedHttp.client.warm(host);
+    }
+    return _buildAuthHeaders(sid, access);
+  }
+
+  /// Same as [authHeaders] but awaits a token refresh when one is needed.
+  static Future<Map<String, String>> authHeadersAsync(
+    String url, {
+    String? sessionId,
+  }) async {
+    final sid = sessionId ?? _cachedSession?.sessionId;
+    final host = _bearerHost(url);
+    final access = host.isEmpty
+        ? const <String, String>{}
+        : await SharedHttp.client.authHeaderFor(host);
+    return _buildAuthHeaders(sid, access);
+  }
+
+  /// Only the Access credential, for requests where the Odoo cookie must not
+  /// be sent (WebView initial requests). Empty when the host has no fresh token.
+  static Map<String, String> bearerHeaders(String url) {
+    final host = _bearerHost(url);
+    final access = SharedHttp.client.cachedAuthHeader(host);
+    if (access.isEmpty && host.isNotEmpty) {
+      SharedHttp.client.warm(host);
+    }
+    return access;
+  }
+
+  /// Host whose bearer may be attached to [url]; empty unless it is https.
+  static String _bearerHost(String url) {
+    final uri = Uri.tryParse(url);
+    return uri != null && uri.scheme == 'https' ? uri.host : '';
+  }
+
+  // Cookie only: custom headers such as X-Openerp-Session-Id are not dropped
+  // on cross-origin redirects (Odoo redirects url attachments elsewhere).
+  static Map<String, String> _buildAuthHeaders(
+    String? sid,
+    Map<String, String> access,
+  ) => {
+    if (sid != null && sid.isNotEmpty) 'Cookie': 'session_id=$sid',
+    ...access,
+  };
+
   static Future<http.Response> makeAuthenticatedRequest(
     String url, {
     Map<String, String>? headers,
@@ -1320,24 +1408,23 @@ class OdooSessionManager {
 
     final uri = Uri.parse(url);
     final requestHeaders = {
-      'Cookie': 'session_id=${session.sessionId}',
+      ...await authHeadersAsync(url, sessionId: session.sessionId),
       ...?headers,
     };
+    final requestTimeout = timeout ?? const Duration(seconds: 30);
 
     Exception? lastError;
 
     for (int attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        final client = http.Client();
-        try {
-          final response = await client
+        // The shared client's default 60s cap must not cut long fetches
+        // (e.g. PDF rendering) short of the caller's own timeout.
+        return await SharedHttp.withTimeout(
+          requestTimeout,
+          () => ioClient
               .get(uri, headers: requestHeaders)
-              .timeout(timeout ?? const Duration(seconds: 30));
-
-          return response;
-        } finally {
-          client.close();
-        }
+              .timeout(requestTimeout),
+        );
       } catch (e) {
         lastError = e is Exception ? e : Exception(e.toString());
         if (attempt < maxRetries && _isRetryableError(e)) {

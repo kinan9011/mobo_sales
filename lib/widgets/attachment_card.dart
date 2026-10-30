@@ -3,6 +3,7 @@ import 'package:hugeicons/hugeicons.dart';
 import 'package:intl/intl.dart';
 import '../models/attachment.dart';
 import '../services/odoo_session_manager.dart';
+import '../utils/odoo_host_headers.dart';
 
 class AttachmentCard extends StatelessWidget {
   final Attachment attachment;
@@ -274,7 +275,7 @@ class _AttachmentThumbnail extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: Image.network(
             fullUrl,
-            headers: {'Cookie': 'session_id=${session.sessionId}'},
+            headers: odooHostHeaders(fullUrl, session),
             fit: BoxFit.cover,
             errorBuilder: (context, error, stack) {
               return Container(

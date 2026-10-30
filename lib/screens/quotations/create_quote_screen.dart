@@ -21,6 +21,7 @@ import '../../services/odoo_session_manager.dart';
 import '../../services/odoo_error_handler.dart';
 import '../../widgets/confetti_dialogs.dart';
 import '../../utils/data_loss_warning_mixin.dart';
+import '../../utils/odoo_image_headers.dart';
 import '../../widgets/custom_text_field.dart';
 import '../../widgets/custom_date_picker.dart';
 import '../../utils/date_picker_utils.dart';
@@ -1726,6 +1727,7 @@ class _CreateQuoteScreenState extends State<CreateQuoteScreen>
                     child: ClipOval(
                       child: Image.network(
                         _selectedCustomer!.imageUrl!,
+                        headers: odooImageHeaders(_selectedCustomer!.imageUrl!),
                         width: 40,
                         height: 40,
                         fit: BoxFit.cover,
@@ -1886,6 +1888,7 @@ class _CreateQuoteScreenState extends State<CreateQuoteScreen>
                           child: customer.imageUrl!.startsWith('http')
                               ? Image.network(
                                   customer.imageUrl!,
+                                  headers: odooImageHeaders(customer.imageUrl!),
                                   width: 40,
                                   height: 40,
                                   fit: BoxFit.cover,

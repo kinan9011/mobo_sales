@@ -228,7 +228,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _performLogout(BuildContext context) async {
+  Future<void> _performLogout(BuildContext context, {Uri? cfLogoutUrl}) async {
     BuildContext? dialogContext;
 
     showDialog(
@@ -299,18 +299,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     if (context.mounted) {
-      Navigator.of(
-        context,
-      ).pushNamedAndRemoveUntil('/login', (route) => false);
+      Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
     }
     final rootContext = navigatorKey.currentContext;
     if (rootContext != null && rootContext.mounted) {
       CustomSnackbar.showSuccess(rootContext, 'Logged out successfully');
     }
+    if (cfLogoutUrl != null) {
+      try {
+        await launchUrl(cfLogoutUrl, mode: LaunchMode.externalApplication);
+      } catch (_) {}
+    }
   }
 
   Future<void> _showLogoutDialog(BuildContext context) async {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final cfLogoutUrl = await SessionService.instance.cloudflareLogoutUrl();
+    var signOutOfCloudflare = false;
+    if (!context.mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: true,
@@ -327,12 +333,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 : Theme.of(context).colorScheme.onSurface,
           ),
         ),
-        content: Text(
-          'Are you sure you want to log out? Your session will be ended.',
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: isDark
-                ? Colors.grey[300]
-                : Theme.of(context).colorScheme.onSurfaceVariant,
+        content: StatefulBuilder(
+          builder: (ctx, setDialogState) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Are you sure you want to log out? Your session will be ended.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: isDark
+                      ? Colors.grey[300]
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (cfLogoutUrl != null)
+                CheckboxListTile(
+                  value: signOutOfCloudflare,
+                  onChanged: (v) =>
+                      setDialogState(() => signOutOfCloudflare = v ?? false),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text(
+                    'Also sign out of Cloudflare on this device',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: isDark
+                          ? Colors.grey[300]
+                          : Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
         actionsPadding: const EdgeInsets.symmetric(
@@ -399,7 +429,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
 
     if (confirmed == true && context.mounted) {
-      await _performLogout(context);
+      await _performLogout(
+        context,
+        cfLogoutUrl: signOutOfCloudflare ? cfLogoutUrl : null,
+      );
     }
   }
 

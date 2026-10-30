@@ -18,9 +18,12 @@ class InvoiceService {
       final contextParams = {
         'lang': 'en_US',
         'tz': 'UTC',
-        'allowed_company_ids': session != null && session.allowedCompanyIds.isNotEmpty
+        'allowed_company_ids':
+            session != null && session.allowedCompanyIds.isNotEmpty
             ? session.allowedCompanyIds
-            : (session?.selectedCompanyId != null ? [session!.selectedCompanyId!] : []),
+            : (session?.selectedCompanyId != null
+                  ? [session!.selectedCompanyId!]
+                  : []),
         'active_model': 'account.move',
         'active_id': moveId,
         'active_ids': [moveId],

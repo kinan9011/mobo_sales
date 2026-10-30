@@ -1,0 +1,15 @@
+{
+  "webcredentials": {
+    "apps": ["REPLACE_TEAM_ID.com.cybrosys.mobo-sale"]
+  },
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["REPLACE_TEAM_ID.com.cybrosys.mobo-sale"],
+        "components": [
+          { "/": "/oauth/callback" }
+        ]
+      }
+    ]
+  }
+}

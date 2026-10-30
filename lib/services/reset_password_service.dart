@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'package:http/http.dart' as http;
+import 'odoo_session_manager.dart';
 
 class ResetPasswordService {
   static Future<Map<String, dynamic>> sendResetPasswordEmail({
@@ -41,7 +41,7 @@ class ResetPasswordService {
 
       for (final endpoint in possibleEndpoints) {
         try {
-          final response = await http
+          final response = await OdooSessionManager.ioClient
               .get(
                 Uri.parse('$cleanUrl$endpoint?db=$database'),
                 headers: {
@@ -126,7 +126,7 @@ class ResetPasswordService {
         headers['Cookie'] = cookies.values.join('; ');
       }
 
-      var response = await http
+      var response = await OdooSessionManager.ioClient
           .post(
             Uri.parse('$cleanUrl$workingEndpoint'),
             headers: headers,
@@ -141,7 +141,7 @@ class ResetPasswordService {
           'redirect': '/web/login',
         };
 
-        response = await http
+        response = await OdooSessionManager.ioClient
             .post(
               Uri.parse('$cleanUrl$workingEndpoint'),
               headers: headers,
@@ -154,7 +154,7 @@ class ResetPasswordService {
           final formDataWithoutDb = Map<String, String>.from(formData);
           formDataWithoutDb.remove('db');
 
-          response = await http
+          response = await OdooSessionManager.ioClient
               .post(
                 Uri.parse(urlWithDb),
                 headers: {...headers, 'Referer': urlWithDb},
@@ -165,7 +165,7 @@ class ResetPasswordService {
           if (response.statusCode == 400) {
             final minimalData = {'login': login};
 
-            response = await http
+            response = await OdooSessionManager.ioClient
                 .post(
                   Uri.parse(urlWithDb),
                   headers: {...headers, 'Referer': urlWithDb},
@@ -184,7 +184,7 @@ class ResetPasswordService {
             final redirectUrl = location.startsWith('http')
                 ? location
                 : '$cleanUrl$location';
-            final redirectResponse = await http
+            final redirectResponse = await OdooSessionManager.ioClient
                 .get(
                   Uri.parse(redirectUrl),
                   headers: {
@@ -484,7 +484,7 @@ class ResetPasswordService {
         'id': DateTime.now().millisecondsSinceEpoch,
       };
 
-      final response = await http
+      final response = await OdooSessionManager.ioClient
           .post(
             Uri.parse(signupUrl),
             headers: {
@@ -522,7 +522,7 @@ class ResetPasswordService {
       final loginUrl = '$cleanUrl/web/login';
       final resetUrl = '$cleanUrl/web/reset_password';
 
-      final initialGet = await http
+      final initialGet = await OdooSessionManager.ioClient
           .get(
             Uri.parse('$loginUrl?redirect=/web/login'),
             headers: {
@@ -542,7 +542,7 @@ class ResetPasswordService {
         cookies.addAll(_parseCookies(initialSetCookie));
       }
 
-      final resetGet = await http
+      final resetGet = await OdooSessionManager.ioClient
           .get(
             Uri.parse('$resetUrl?redirect=/web/login'),
             headers: {
@@ -595,7 +595,7 @@ class ResetPasswordService {
               .join('; '),
       };
 
-      final postResponse = await http
+      final postResponse = await OdooSessionManager.ioClient
           .post(
             Uri.parse('$resetUrl?redirect=/web/login'),
             headers: postHeaders,

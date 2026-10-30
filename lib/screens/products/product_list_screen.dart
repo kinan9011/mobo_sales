@@ -11,6 +11,7 @@ import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:odoo_rpc/odoo_rpc.dart';
 import 'package:provider/provider.dart';
 import 'package:mobo_sales/utils/app_theme.dart';
+import 'package:mobo_sales/utils/odoo_image_headers.dart';
 import 'package:shimmer/shimmer.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
@@ -2267,6 +2268,7 @@ class ProductListScreenState extends State<ProductListScreen>
   Widget _buildFadeInNetworkImage(String imageUrl, String name) {
     return CachedNetworkImage(
       imageUrl: imageUrl,
+      httpHeaders: odooImageHeaders(imageUrl),
       width: 60,
       height: 60,
       fit: BoxFit.cover,

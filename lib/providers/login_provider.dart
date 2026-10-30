@@ -6,6 +6,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/session_service.dart';
 import '../services/auth_service.dart';
 import '../services/odoo_api_service.dart';
+import '../services/cf_access/cf_access_gate.dart';
+import '../services/shared_http.dart';
+import '../utils/server_url_policy.dart';
 import '../screens/login/totp_page.dart';
 
 /// Manages user login form state, database discovery, and authentication flow.
@@ -23,6 +26,8 @@ class LoginProvider with ChangeNotifier {
   List<String> _previousUrls = [];
   List<String> get previousUrls => _previousUrls;
   bool _disposed = false;
+  bool cfSignInRequired = false;
+  bool isCfSigningIn = false;
   String _selectedProtocol = 'https://';
   String get selectedProtocol => _selectedProtocol;
 
@@ -31,9 +36,11 @@ class LoginProvider with ChangeNotifier {
   final TextEditingController passwordController = TextEditingController();
 
   final AuthService _authService;
+  final CfAccessGate _cfGate;
 
-  LoginProvider({AuthService? authService})
-    : _authService = authService ?? AuthService() {
+  LoginProvider({AuthService? authService, CfAccessGate? cfGate})
+    : _authService = authService ?? AuthService(),
+      _cfGate = cfGate ?? CfAccessGate(SharedHttp.auth) {
     _loadSavedCredentials();
   }
 
@@ -161,12 +168,30 @@ class LoginProvider with ChangeNotifier {
     isLoading = false;
     isLoadingDatabases = false;
     disableFields = false;
+    cfSignInRequired = false;
+    isCfSigningIn = false;
     notifyListeners();
   }
 
   /// Fetches the list of databases available at the entered server URL.
   Future<void> fetchDatabaseList() async {
-    if (urlController.text.isEmpty) return;
+    if (urlController.text.isEmpty) {
+      if (cfSignInRequired) {
+        cfSignInRequired = false;
+        _safeNotifyListeners();
+      }
+      return;
+    }
+
+    final insecureError = insecureServerUrlError(
+      _normalizeUrl(urlController.text),
+    );
+    if (insecureError != null) {
+      _resetDatabaseState();
+      errorMessage = insecureError;
+      _safeNotifyListeners();
+      return;
+    }
 
     isLoadingDatabases = true;
     _safeNotifyListeners();
@@ -192,7 +217,12 @@ class LoginProvider with ChangeNotifier {
     }
 
     try {
-      final dbList = await _authService.fetchDatabaseList(baseUrl);
+      if (!await _passesCloudflareGate(baseUrl)) return;
+
+      final dbList = await _cfGate.guard(
+        Uri.parse(baseUrl),
+        () => _authService.fetchDatabaseList(baseUrl),
+      );
 
       if (dbList.isEmpty) {
         await attemptFallback('No databases found on this server.');
@@ -205,48 +235,89 @@ class LoginProvider with ChangeNotifier {
         urlCheck = true;
         errorMessage = null;
 
-        if (database != null &&
-            uniqueDbList.contains(database)) {
+        if (database != null && uniqueDbList.contains(database)) {
           database = database;
         } else if (uniqueDbList.isNotEmpty) {
           database = uniqueDbList.first.toString();
         }
       }
+    } on CfGateException catch (e) {
+      _resetDatabaseState();
+      errorMessage = e.message;
     } on SocketException catch (e) {
-      String msg = 'Network error occurred. Please check your internet connection and server URL.';
+      String msg =
+          'Network error occurred. Please check your internet connection and server URL.';
       if (e.toString().contains('Network is unreachable')) {
-        msg = 'No internet connection. Please check your network settings and try again.';
+        msg =
+            'No internet connection. Please check your network settings and try again.';
       } else if (e.toString().contains('Connection refused')) {
-        msg = 'Server is not responding. Please verify the server URL and ensure the server is running.';
+        msg =
+            'Server is not responding. Please verify the server URL and ensure the server is running.';
       }
       await attemptFallback(msg);
     } on TimeoutException catch (_) {
-      await attemptFallback('Connection timed out. The server may be slow or unreachable. Please try again.');
+      await attemptFallback(
+        'Connection timed out. The server may be slow or unreachable. Please try again.',
+      );
     } on OdooException catch (e) {
       await attemptFallback(_formatOdooError(e));
     } on FormatException catch (e) {
-      String msg = 'Server sent invalid data format. Please verify this is an Odoo server.';
+      String msg =
+          'Server sent invalid data format. Please verify this is an Odoo server.';
       if (e.toString().toLowerCase().contains('html')) {
-        msg = 'Invalid server response. This may not be an Odoo server or the URL path is incorrect.';
+        msg =
+            'Invalid server response. This may not be an Odoo server or the URL path is incorrect.';
       }
       await attemptFallback(msg);
     } catch (e) {
       final errorStr = e.toString().toLowerCase();
-      String msg = 'Unable to connect to server. Please verify the server URL is correct.';
-      if (errorStr.contains('handshake')) {
-        msg = 'SSL connection failed. Try using HTTP instead of HTTPS or contact your administrator.';
-      } else if (errorStr.contains('certificate')) {
-        msg = 'SSL certificate error. The server certificate may be invalid or expired.';
+      String msg =
+          'Unable to connect to server. Please verify the server URL is correct.';
+      if (errorStr.contains('handshake') || errorStr.contains('certificate')) {
+        msg = tlsFailureMessage;
       } else if (errorStr.contains('host')) {
-        msg = 'Cannot reach server. Please check the server URL and your internet connection.';
+        msg =
+            'Cannot reach server. Please check the server URL and your internet connection.';
       } else if (errorStr.contains('access_denied_db_list')) {
-        msg = 'Database listing is disabled (list_db=false). Cannot fetch databases automatically.';
+        msg =
+            'Database listing is disabled (list_db=false). Cannot fetch databases automatically.';
       }
       await attemptFallback(msg);
     } finally {
       isLoadingDatabases = false;
       _safeNotifyListeners();
     }
+  }
+
+  /// Cloudflare Access step before any Odoo request: false when the user
+  /// has to sign in (or cannot), with [cfSignInRequired]/[errorMessage] set.
+  Future<bool> _passesCloudflareGate(String baseUrl) async {
+    final status = await _cfGate.check(Uri.parse(baseUrl));
+    cfSignInRequired = status == CfGateStatus.signInRequired;
+    if (status == CfGateStatus.open) return true;
+    _resetDatabaseState();
+    errorMessage = CfAccessGate.messageFor(status);
+    return false;
+  }
+
+  /// Signs in to Cloudflare Access in the system browser, then loads the
+  /// database list. Also the retry after a cancelled or failed sign-in.
+  Future<void> signInWithOrganization() async {
+    if (isCfSigningIn || urlController.text.trim().isEmpty) return;
+
+    isCfSigningIn = true;
+    errorMessage = null;
+    _safeNotifyListeners();
+    try {
+      await _cfGate.signIn(Uri.parse(_normalizeUrl(urlController.text)));
+    } on CfGateException catch (e) {
+      errorMessage = e.message;
+      isCfSigningIn = false;
+      _safeNotifyListeners();
+      return;
+    }
+    isCfSigningIn = false;
+    await fetchDatabaseList();
   }
 
   void _resetDatabaseState() {
@@ -284,6 +355,9 @@ class LoginProvider with ChangeNotifier {
   }
 
   String _formatLoginError(dynamic error) {
+    final tlsError = tlsErrorMessage(error);
+    if (tlsError != null) return tlsError;
+
     final errorStr = error.toString().toLowerCase();
 
     if (errorStr.contains('html instead of json') ||
@@ -307,7 +381,7 @@ class LoginProvider with ChangeNotifier {
     } else if (errorStr.contains('server') || errorStr.contains('500')) {
       return 'Server error occurred. Please try again later or contact your administrator.';
     } else if (errorStr.contains('ssl') || errorStr.contains('certificate')) {
-      return 'SSL connection failed. Try using HTTP instead of HTTPS.';
+      return tlsFailureMessage;
     } else if (errorStr.contains('connection refused')) {
       return 'Server is not responding. Please verify the server URL and try again.';
     } else {
@@ -327,6 +401,15 @@ class LoginProvider with ChangeNotifier {
       return false;
     }
 
+    final insecureError = insecureServerUrlError(
+      _normalizeUrl(urlController.text),
+    );
+    if (insecureError != null) {
+      errorMessage = insecureError;
+      _safeNotifyListeners();
+      return false;
+    }
+
     isLoading = true;
     errorMessage = null;
     disableFields = true;
@@ -341,11 +424,14 @@ class LoginProvider with ChangeNotifier {
         throw Exception('Please fill in all required fields.');
       }
 
-      final loginSuccess = await _authService.loginAndSaveSession(
-        serverUrl: serverUrl,
-        database: database!,
-        userLogin: userLogin,
-        password: password,
+      final loginSuccess = await _cfGate.guard(
+        Uri.parse(serverUrl),
+        () => _authService.loginAndSaveSession(
+          serverUrl: serverUrl,
+          database: database!,
+          userLogin: userLogin,
+          password: password,
+        ),
       );
 
       if (loginSuccess) {
@@ -363,6 +449,9 @@ class LoginProvider with ChangeNotifier {
         errorMessage = 'Login failed. Please check your credentials.';
         return false;
       }
+    } on CfGateException catch (e) {
+      errorMessage = e.message;
+      return false;
     } on SocketException {
       errorMessage =
           'Network connection failed. Please check your internet connection.';
